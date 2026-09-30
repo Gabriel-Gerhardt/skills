@@ -110,7 +110,13 @@ state or a live external system directly," not a specific list of names):
   driver used solely by a migration task) — the latter is easy to miss
   precisely because it's not on the app's own runtime classpath.
 - **Schema-migration tooling** (Liquibase, Flyway, or equivalent) and its own
-  dependency chain (e.g. a CLI-arg-parsing library it pulls in).
+  dependency chain (e.g. a CLI-arg-parsing library it pulls in). One
+  exception worth naming: bumping the migration tool's own Gradle *plugin*
+  (not the schema-execution engine itself) purely because a newer Gradle
+  wrapper version — landing as part of an unrelated framework bump — can no
+  longer resolve the old plugin, is a build-tooling compatibility fix, not
+  a schema/behavior change, and doesn't need this Blocker gate. Bumping it
+  for new migration *features* still does.
 - **Cache/queue/broker clients** actually used against a live external
   system in production (a Redis client, a Kafka client) — as opposed to a
   serialization/codec library used *by* one of those, which carries lower
@@ -142,7 +148,14 @@ the Blocker above is explicitly out of scope for this list.
   unused imports).
 - **OWASP dependency-check** (Gradle plugin) — needs `autoUpdate=true`, a
   pre-seeded local NVD DB, or an `nvdApiKey` to actually produce a report —
-  see step 8.
+  see step 8. If the job instead fails during Gradle's own configuration
+  phase over a repository credential property that the CI job never
+  receives, that's not a dependency-check problem at all — it's a
+  `repositories {}` block requiring auth for a repo that's actually public.
+  Verify with a raw unauthenticated request against that repo URL before
+  adding credentials; a sibling service pointed at the same repository
+  without requiring any is stronger evidence than the request succeeding
+  alone.
 - **JaCoCo**
 - **ErrorProne** (Gradle plugin and core analyzer are versioned separately —
   check both)
@@ -399,6 +412,10 @@ wrong with the code." The last two rows below are both instances of this.
 | A module's tests fail to compile only after the full-project build, over rules that passed fine when that module built alone | Different lint/tool config than the rest of the project was active when it was written (e.g. an isolated environment on a stale commit) | Always run the full-project build per step 5, not just the module you touched |
 | `sonar` Gradle task fails with "not authorized" + "must define sonar.organization" against a **local** Sonar instance | Scanner defaulted to targeting SonarCloud because `sonar.host.url` wasn't passed explicitly | Always pass `-Dsonar.host.url=http://localhost:<port> -Dsonar.token=...` explicitly, every session |
 | `dependencyCheckAnalyze` fails immediately, `NoDataException` | `autoUpdate=false` with no local NVD DB ever built on this machine | Environment gap, not a regression — see step 8 |
+| Every IDP Sonar check fails with `Component key '<service>' not found` (404) | Nothing was ever published under that key — usually the CI sonar job dies before running (e.g. `repositories {}` interpolating `"${artifactory_user}"` from a gitignored `gradle.properties`), or the analysis goes out under a different key | Fix publishing first; no test moves a 404. Compare with a sibling on the same CI template, `curl -sI` the repo unauthenticated, and grep the workspace for who reads the credential property |
+| Sonar coverage sits well below the JaCoCo number, and Sonar's `lines_to_cover` is larger than the JaCoCo total | Classes excluded only from the JaCoCo report (a `classDirectories`/`jacocoCoverageExclusions` filter) still count in Sonar as fully uncovered | Diff `lines_to_cover` vs the JaCoCo total — the gap is exactly those classes. Test them (team precedent) or mirror into `sonar.coverage.exclusions` — decide with the user, and keep JaCoCo and Sonar measuring the same set |
+| Sonar coverage 0.0% on a multi-module build; log shows `No coverage report can be found` once per submodule | Relative `sonar.coverage.jacoco.xmlReportPaths` is resolved against each submodule's own dir | Make it absolute: `"${rootDir}/build/reports/jacoco/<task>/<task>.xml"` |
+| Local project shows "The main branch of this project is empty" | Standalone scanner CLI (`docker run sonar-scanner-cli -Dsonar.sources=/usr/src`) run from Git Bash — MSYS rewrites `/usr/src` | Use the Gradle-plugin `sonar.sh` (assinatura-job's), which also reads the JaCoCo path from `build.gradle` |
 
 **On the equals/hashCode row above**: fixing it produces a diff that *reads*
 like a design decision (a hand-written `equals()` appearing where there

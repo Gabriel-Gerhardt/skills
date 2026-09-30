@@ -52,7 +52,9 @@ const xml = fs.readFileSync(xmlPath, 'utf8');
 
 // Adjust to your own project's generated-code layout.
 const GENERATED_PREFIXES = ['/proto/', '/avro/'];
-const GENERATED_SUFFIXES = ['MapperImpl'];
+// MapStruct names its implementation <MapperInterface>Impl, so a versioned mapper
+// (SkuDataMapperV1 -> SkuDataMapperV1Impl) doesn't end in "MapperImpl".
+const GENERATED_SUFFIXES = [/Mapper\w*Impl$/];
 
 const tagRe = /<(\/?)([a-zA-Z0-9_]+)((?:\s+[a-zA-Z0-9:_-]+="[^"]*")*)\s*(\/?)>/g;
 const attrRe = /([a-zA-Z0-9:_-]+)="([^"]*)"/g;
@@ -110,7 +112,7 @@ while ((m = tagRe.exec(xml)) !== null) {
 results = results.filter(r => r.missed !== null && r.covered !== null);
 results = results.filter(r =>
   !GENERATED_PREFIXES.some(p => r.name.includes(p)) &&
-  !GENERATED_SUFFIXES.some(s => r.name.endsWith(s))
+  !GENERATED_SUFFIXES.some(re => re.test(r.name))
 );
 results = results
   .map(r => ({ ...r, total: r.missed + r.covered }))
