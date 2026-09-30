@@ -20,7 +20,12 @@ service in the same org has already made the identical jump — its
 migration commit, MR thread, or QA issue is often the fastest way to find
 a real gotcha before hitting it yourself, and independent convergence on
 the same bug across two unrelated codebases is strong evidence it's a
-framework-level issue rather than something specific to yours.
+framework-level issue rather than something specific to yours. This runs
+in the other direction too: validating a *different* service's migration
+can surface a bug in a service it merely depends on for an end-to-end
+check, one nobody set out to test. Treat that as a real finding worth its
+own report against the dependency, not just an obstacle to route around
+in the service you were actually validating.
 
 **The one thing that discovery-by-building can't catch: silent behavior
 changes.** Not everything that breaks fails to compile or fails a test —
@@ -94,6 +99,20 @@ new, not a pre-existing one getting misattributed to this pass.
   version — and if it does, understand why the pin existed before
   deleting it outright.
 
+- **When an ORM/metadata-driven query-building mechanism changes behavior,
+  sweep every data-access method by which mechanism it actually uses, not
+  by which entity it belongs to.** A single repository routinely mixes
+  hand-written SQL (a `@Query` or a raw `DatabaseClient` call — immune,
+  since the framework's metadata never gets involved) with
+  framework-generated queries (a derived method, or a template call bound
+  to the entity class — exposed). The two can sit in the same file, even
+  the same repository, with the read path on one mechanism and the write
+  or delete path on the other — so a healthy-looking `GET` proves nothing
+  about whether `PUT`/`DELETE`/an event-driven write on the *same* entity
+  still works. Audit per method, not per entity, and don't stop at the
+  first broken one — the same root cause typically hits every entity using
+  the exposed mechanism, each surfacing on a different CRUD verb.
+
 **When a dependency's actual behavior isn't clear from its docs or
 changelog** — which constructor signature it still exposes, whether a
 config flag moved to a different class, whether two jar versions really
@@ -153,6 +172,17 @@ by feeding an endpoint a request body shaped the way real callers already
 send it — not a freshly-written one that happens to match the new
 library's stricter expectations.
 
+**Check for build-tooling plugins that only break inside an IDE's own
+Gradle sync, never in a CLI/CI build.** A schema-migration or other
+Gradle-plugin dependency can pin a version that's fine for `./gradlew
+build`/`test` on the command line but that an IDE's own Gradle
+integration fails to resolve after the wrapper itself moves to a new
+major version — the CLI build and CI both stay green throughout, so
+nothing in the pipeline ever reports it. The only way to catch this is to
+actually open the project in the IDE the team uses and let it sync,
+separately from running the build; a fully green CI run is not evidence
+this category is fine.
+
 ## Not Everything Flagged Is Migration-Caused
 
 A reviewer (or your own reading of a diff) calling something "changed by
@@ -165,8 +195,18 @@ pre-existing contract violation nobody had written a method for yet); and
 a change required by a linter/static-analysis rule the bump forces you to
 satisfy, which reads like a behavior change in the diff but provably isn't
 one — check against the actual JDK/library source semantics, not just the
-diff's shape. Both are real findings worth reporting on their own terms —
-just not as "this bump broke X."
+diff's shape. A third shape: a real failure, correctly observed, attributed
+to the wrong one of several plausible migration-related causes — a
+teammate can genuinely hit an error on the new version and still name the
+wrong mechanism, especially when more than one breaking change landed in
+the same pass. Verify by reproducing with a request/input shaped to isolate
+exactly the claimed mechanism (e.g. the same body with only the one
+disputed field varied), and check that the *failure signature* matches
+what that mechanism would actually produce — a rejection during request
+parsing and a failure two layers downstream during persistence are not
+the same bug, even if the same request triggers both. All three shapes are
+real findings worth reporting on their own terms — just not as "this bump
+broke X."
 
 ## Forbidden
 
@@ -177,6 +217,15 @@ even for a framework bump, especially around exception handling, response
 serialization, and request-deserialization leniency (the two are not the
 same check — see Silent Failures above) — exactly the areas a framework
 major version likes to change defaults on quietly.
+
+**A bug-tracker issue marked "closed" is itself a self-report, not
+independent verification.** When a fix has its own separate QA/validation
+card (as opposed to the same person's own tests in the same issue), check
+that card's actual status before treating the fix as confirmed — a dev
+issue can close the moment its author believes the fix works, while the
+paired QA card sits open with every scenario still blocked or unexecuted.
+Report or document a fix at the confidence its actual verification
+supports, not at the confidence its author's issue-closing note implies.
 
 ## Real-World Impact Log
 
