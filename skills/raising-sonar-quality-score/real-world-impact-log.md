@@ -245,3 +245,76 @@ coverage work landed as 9 granular commits, and one loop over
 code — the two user-approved Reliability fixes. Before the commits existed, a
 `touch`ed marker file in the scratchpad (created after the approved fixes, before
 the first test) gave the same check via `find -newer`.
+
+## 2026-09-30 — marketplace-order-gateway
+
+Java 21 / Spring Boot 3.3.2 / Gradle 8.9, 5 Gradle projects (root, contract,
+implementation, integration, commons), CI template `java/.java-21-ci-v2.yml`. No
+stack or tooling bump. IDP at the start: Coverage **0.0** (IDP minimum is **50.0** —
+first time that threshold was visible), Reliability C, Security Review E; everything
+else OK. Local Sonar after the pass: coverage 0.0 (IDP) → **94.8%** (line 97.3%,
+branch 85.3%); Reliability C → A, 0 bugs; 1910 → 2083 tests; duplications 6.1%.
+User stopped at 94.8% ("Já tá bom de teste"), 0.2 short of the 95% default.
+
+**Headline lesson: a 0.0% coverage with ~84% real JaCoCo coverage is a task-graph
+problem, and `./gradlew sonar --dry-run` proves it in seconds.** `allprojects {
+plugins.withId('org.sonarqube') { sonar dependsOn jacocoTestReport } }` wired each
+project's sonar task to *its own* report only, so a bare `./gradlew sonar` (what the
+CI template evidently runs) executed `:test` + `:jacocoTestReport` of the root — one
+class, two tests — and none of the four submodules' tests; their XML reports never
+existed. Fix: root `sonar`/`sonarqube` also `dependsOn(subprojects.collect {
+it.tasks.named('jacocoTestReport') })`; the dry-run then lists all 5 test + report
+tasks. The user then noticed the same pattern elsewhere: catalog-service and
+product-service (coverage OK on the IDP) have `tasks.named('sonar') { dependsOn …
+report }`; assinatura-service and assinatura-job (coverage failing) have a
+`codeCoverageReport` task that nothing ties to `sonar` — and their local `sonar.sh`
+hides it by naming the report task explicitly (`clean test codeCoverageReport
+sonar`). A local script that calls the report task by name can't reproduce this bug;
+this run's `sonar.sh` calls a bare `clean sonar` on purpose, to mirror CI.
+
+**Local Sonar was newer than central, and it matters for what to trust.** Local
+Community Build 26.7 vs central 25.11:
+- Three Reliability issues existed only locally (`S8700` duration between
+  `LocalDateTime`s; two `S3655` `Optional.get()` without `isPresent`) and 19
+  INFO-level `S8688` (`now()` without zone, rating-neutral). Fixed the three anyway at
+  the user's request, each provably identical: `get()` → `orElseThrow()` (the JDK
+  implements one as the other) and `Duration.between(a.toInstant(ZoneOffset.UTC),
+  b.toInstant(ZoneOffset.UTC))` (a fixed offset has no DST, so the result equals the
+  `LocalDateTime` difference). The central-only two NPE bugs were fixed by keeping
+  one read of `getRequiredType()` in a local and by collapsing a re-dereferenced
+  `Optional` chain into one — each case checked by hand before proposing it.
+- The DiDi webhook's MD5 (`java:S4790`) is a **hotspot** on 25.x (Security Review E)
+  but an **issue** tagged `former-hotspot` on 26.x (Security D locally). It is the
+  vendor's signing scheme (`md5(payload + appSecret)`) — not a code change. User
+  reviewed it on central as Acknowledged (recommended over Safe: the MAC *is* weak,
+  the risk is accepted, not absent); locally the equivalent is Accept on the issue.
+
+**Where the gap was: one hub with almost no tests.** The DiDiFood (99FOOD)
+integration — the newest hub — was ~620 of 1426 uncovered Sonar units; Rappi another
+~180. Two cheap wins worth repeating: (1) `diff` a hub's class against its siblings
+before writing a test — `DidiFoodValidateStrategy` was byte-identical to
+`CrValidateStrategy` except the hub enum, and `Didi/Rappi/IfoodPaymentMapper` were
+identical to each other, so the existing sibling test was cloned with `sed` (131
+units for one command); (2) one end-to-end `Convert` test built from a realistic
+JSON (via Jackson — the project's `JsonUtils` is Gson and ignores `@JsonNaming`)
+covered the converter plus 7 resolvers at once. Real behavior pinned along the way,
+not fixed: `switchIfEmpty(save(...).then(doCreate(...)))` in
+`DidiFoodReceivedService` *invokes* `saveOrder`/`confirmOrder` even when the order
+exists (their Monos just aren't subscribed) — harmless with lazy reactive Mongo, but
+test-pinned as "not subscribed" and logged.
+
+**Checkstyle `AbbreviationAsWordInName` (allowedAbbreviationLength=0) rejects the
+article "A" in camelCase test names** (`readyMovesAWaitingOrder…` → "AW"). Seven such
+names across this run; a green `:implementation:test` doesn't see it — only
+`checkstyleTest` does, which is why a checkpoint `clean build` failed once mid-run.
+Run `checkstyleTest` with every test batch, not just at the end.
+
+**Local smoke test**: the app runs on Windows here (unlike product/catalog's EPOLL
+Redis issue) once local Mongo is up (`docker-compose up -d`); `/actuator/health` UP,
+`/v1/integrations/hub/channel` and a Mongo-backed `GET /v1/integrations/{hub}/{order}`
+answered, and `GET /v1/integrations/hub/abc/channel/1` exercised the changed
+`GlobalExceptionHandler` line (HTTP 400, unchanged `ErrorInfo` shape). The local
+consumer joins the shared dev topic `MKT_ORDER_RECEIVED` and skips records whose
+type header names a class from another build (`…kafka.MktOrderReceivedEvent` vs this
+code's `…kafka.event.…`) — pre-existing, but it advances the shared dev group's
+offsets, so don't leave a local instance running.
